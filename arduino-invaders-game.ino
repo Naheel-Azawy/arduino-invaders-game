@@ -14,6 +14,62 @@ LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 #endif
 
+// directions
+// LEFT and RIGHT are also used for shapes (ored with the type)
+#define UP    0x10
+#define DOWN  0x20
+#define LEFT  0x00
+#define RIGHT 0x04
+#define NONE  0xff
+
+void setup() {
+
+  Serial.begin(9600);
+
+#ifndef USE_I2C_LCD
+  lcd.begin(16, 2);
+#else
+  lcd.init();
+  lcd.backlight();
+#endif
+
+  pinMode(JOYSTICK_S_PIN, INPUT);
+  digitalWrite(JOYSTICK_S_PIN, HIGH);
+
+  start();
+
+}
+
+bool joystick_sw = false;
+byte joystick_dir = NONE;
+int joystick_x = 0;
+int joystick_y = 0;
+
+void check_joystick() {
+
+  joystick_sw = digitalRead(JOYSTICK_S_PIN) == LOW;
+
+  joystick_y = analogRead(JOYSTICK_Y_PIN);
+  if (joystick_y < 341) {
+    joystick_dir = DOWN;
+  } else if (joystick_y > 682) {
+    joystick_dir = UP;
+  }
+
+  joystick_x = analogRead(JOYSTICK_X_PIN);
+  if (joystick_x < 341) {
+    joystick_dir = LEFT;
+  } else if (joystick_x > 682) {
+    joystick_dir = RIGHT;
+  }
+
+  /*Serial.print("JOYSTICK: ");
+    Serial.print(joystick_sw); Serial.print(" - ");
+    Serial.print(joystick_x); Serial.print(" - ");
+    Serial.println(joystick_y);*/
+
+}
+
 byte inv_left[8] = {0b00000,
                     0b00000,
                     0b00000,
@@ -87,7 +143,6 @@ byte inv_bullet_right[8] = {0b00000,
                             0b00000};
 
 // types
-#define NONE  0xff
 #define PLR   0x0
 #define ALN   0x1
 #define PLR_B 0x2
@@ -96,14 +151,6 @@ byte inv_bullet_right[8] = {0b00000,
 // if types a and b are in fr and to
 #define types_in(fr, to, a, b)                        \
   (((1 << fr) | (1 << to)) == ((1 << a) | (1 << b)))
-
-// shapes (ored with the type). Used also for directions
-#define LEFT  0x0
-#define RIGHT 0x4
-
-// remaining of directions
-#define UP   0x10
-#define DOWN 0x20
 
 // space dimensions
 #define W 4
@@ -122,9 +169,6 @@ typedef struct {
 // game matrix
 thing space[W][H];
 
-// used to store movements temporarily
-thing space_tmp[W][H];
-
 // player i location
 int player;
 
@@ -135,6 +179,145 @@ bool game_over;
 
 // https://www.norwegiancreations.com/2017/09/arduino-tutorial-using-millis-instead-of-delay/
 unsigned long time_now = 0;
+
+void start() {
+  lcd.createChar(ALN   | LEFT,  inv_left           );
+  lcd.createChar(ALN   | RIGHT, inv_right          );
+  lcd.createChar(PLR   | LEFT,  player_left        );
+  lcd.createChar(PLR   | RIGHT, player_right       );
+  lcd.createChar(PLR_B | LEFT,  player_bullet_left );
+  lcd.createChar(PLR_B | RIGHT, player_bullet_right);
+  lcd.createChar(ALN_B | LEFT,  inv_bullet_left    );
+  lcd.createChar(ALN_B | RIGHT, inv_bullet_right   );
+
+  reset();
+  for (;;) game_loop();
+}
+
+void game_loop() {
+
+  check_joystick();
+
+  // main loop
+  int period = 700 / log(M_E + score);
+  if (millis() >= time_now + period) {
+    time_now += period;
+
+    int r;
+
+    // move things
+    for (int i = 0; i < W; ++i) {
+      for (int j = 0; j < H; ++j) {
+        if (!space[i][j].done) continue;
+        if (space[i][j].type == ALN) {
+          r = random() % 5;
+          if (r < 1 && j + 1 < H && space[i][j + 1].type != ALN_B) {
+            thing_move(i, j, DOWN);
+          }
+          r = random() % 3;
+          if (r == 0) {
+            thing_move(i, j, LEFT);
+          } else if (r == 1) {
+            thing_move(i, j, RIGHT);
+          }
+        } else if (space[i][j].type == ALN_B) {
+          thing_move(i, j, DOWN);
+        } else if (space[i][j].type == PLR_B) {
+          thing_move(i, j, UP);
+        }
+
+        check_joystick();
+      }
+    }
+
+    if (game_over) {
+      clear();
+      draw();
+      lcd.setCursor(0, 0);
+      lcd.print("GAME OVER!");
+      lcd.setCursor(0, 1);
+      lcd.print("SCORE: ");
+      lcd.print(score);
+      Serial.print("GAME OVER! SCORE: ");
+      Serial.println(score);
+
+      for (int i = 0; i < 3; ++i) {
+        tone(BUZZER_PIN, 200);
+        delay(100);
+        noTone(BUZZER_PIN);
+        delay(100);
+      }
+
+      delay(3000);
+      reset();
+      return;
+    }
+
+#ifdef AUTOPILOT
+    // move player
+    r = random() % 3;
+    if (r == 0) {
+      player = thing_move(player, H - 1, RIGHT);
+    } else if (r == 1) {
+      player = thing_move(player, H - 1, LEFT);
+    }
+
+    // fire
+    r = random() % 10;
+    if (r == 0) {
+      space[player][H - 2].type = PLR_B;
+    }
+#else
+    // move player
+    if (joystick_dir == RIGHT) {
+      player = thing_move(player, H - 1, RIGHT);
+      joystick_dir = NONE;
+    } else if (joystick_dir == LEFT) {
+      player = thing_move(player, H - 1, LEFT);
+      joystick_dir = NONE;
+    }
+
+    // fire
+    if (joystick_sw) {
+      space[player][H - 2].type = PLR_B;
+      joystick_sw = false;
+    }
+#endif
+
+    check_joystick();
+
+    // make alien
+    bool first_line_empty = true;
+    for (int i = 0; i < W; ++i) {
+      if (space[i][0].type != NONE) {
+        first_line_empty = false;
+      }
+    }
+    r = random() % 10;
+    if (first_line_empty && r < W) {
+      space[r][0].type = ALN;
+    }
+
+    check_joystick();
+
+    // alien fire
+    for (int i = 0; i < W; ++i) {
+      for (int j = 0; j < H / 2; ++j) {
+        if (space[i][j].type == ALN) {
+          r = random() % 10;
+          if (r == 0) {
+            space[i][j + 1].type = ALN_B;
+          }
+        }
+      }
+    }
+
+    check_joystick();
+
+    draw();
+  }
+
+}
 
 void clear() {
   for (int i = 0; i < W; ++i) {
@@ -311,187 +494,4 @@ void reset() {
   score = 0;
   game_over = false;
   draw();
-}
-
-void setup() {
-
-  Serial.begin(9600);
-
-#ifndef USE_I2C_LCD
-  lcd.begin(16, 2);
-#else
-  lcd.init();
-  lcd.backlight();
-#endif
-
-  lcd.createChar(ALN   | LEFT,  inv_left           );
-  lcd.createChar(ALN   | RIGHT, inv_right          );
-  lcd.createChar(PLR   | LEFT,  player_left        );
-  lcd.createChar(PLR   | RIGHT, player_right       );
-  lcd.createChar(PLR_B | LEFT,  player_bullet_left );
-  lcd.createChar(PLR_B | RIGHT, player_bullet_right);
-  lcd.createChar(ALN_B | LEFT,  inv_bullet_left    );
-  lcd.createChar(ALN_B | RIGHT, inv_bullet_right   );
-
-  pinMode(JOYSTICK_S_PIN, INPUT);
-  digitalWrite(JOYSTICK_S_PIN, HIGH);
-
-  reset();
-
-}
-
-bool joystick_fire = false;
-byte joystick_dir = NONE;
-
-void check_joystick() {
-  int s, x, y;
-
-  s = digitalRead(JOYSTICK_S_PIN);
-  if (s == LOW) {
-    joystick_fire = true;
-  }
-
-  y = analogRead(JOYSTICK_Y_PIN);
-  if (y < 341) {
-    joystick_dir = DOWN;
-  } else if (y > 682) {
-    joystick_dir = UP;
-  }
-
-  x = analogRead(JOYSTICK_X_PIN);
-  if (x < 341) {
-    joystick_dir = LEFT;
-  } else if (x > 682) {
-    joystick_dir = RIGHT;
-  }
-
-  /*Serial.print("JOYSTICK: ");
-    Serial.print(s); Serial.print(" - ");
-    Serial.print(x); Serial.print(" - ");
-    Serial.println(y);*/
-}
-
-void loop() {
-
-  check_joystick();
-
-  // main loop
-  int period = 700 / log(M_E + score);
-  if (millis() >= time_now + period) {
-    time_now += period;
-
-    int r;
-
-    // move things
-    for (int i = 0; i < W; ++i) {
-      for (int j = 0; j < H; ++j) {
-        if (!space[i][j].done) continue;
-        if (space[i][j].type == ALN) {
-          r = random() % 5;
-          if (r < 1 && j + 1 < H && space[i][j + 1].type != ALN_B) {
-            thing_move(i, j, DOWN);
-          }
-          r = random() % 3;
-          if (r == 0) {
-            thing_move(i, j, LEFT);
-          } else if (r == 1) {
-            thing_move(i, j, RIGHT);
-          }
-        } else if (space[i][j].type == ALN_B) {
-          thing_move(i, j, DOWN);
-        } else if (space[i][j].type == PLR_B) {
-          thing_move(i, j, UP);
-        }
-
-        check_joystick();
-      }
-    }
-
-    if (game_over) {
-      clear();
-      draw();
-      lcd.setCursor(0, 0);
-      lcd.print("GAME OVER!");
-      lcd.setCursor(0, 1);
-      lcd.print("SCORE: ");
-      lcd.print(score);
-      Serial.print("GAME OVER! SCORE: ");
-      Serial.println(score);
-
-      for (int i = 0; i < 3; ++i) {
-        tone(BUZZER_PIN, 200);
-        delay(100);
-        noTone(BUZZER_PIN);
-        delay(100);
-      }
-
-      delay(3000);
-      reset();
-      return;
-    }
-
-#ifdef AUTOPILOT
-    // move player
-    r = random() % 3;
-    if (r == 0) {
-      player = thing_move(player, H - 1, RIGHT);
-    } else if (r == 1) {
-      player = thing_move(player, H - 1, LEFT);
-    }
-
-    // fire
-    r = random() % 10;
-    if (r == 0) {
-      space[player][H - 2].type = PLR_B;
-    }
-#else
-    // move player
-    if (joystick_dir == RIGHT) {
-      player = thing_move(player, H - 1, RIGHT);
-      joystick_dir = NONE;
-    } else if (joystick_dir == LEFT) {
-      player = thing_move(player, H - 1, LEFT);
-      joystick_dir = NONE;
-    }
-
-    // fire
-    if (joystick_fire) {
-      space[player][H - 2].type = PLR_B;
-      joystick_fire = false;
-    }
-#endif
-
-    check_joystick();
-
-    // make alien
-    bool first_line_empty = true;
-    for (int i = 0; i < W; ++i) {
-      if (space[i][0].type != NONE) {
-        first_line_empty = false;
-      }
-    }
-    r = random() % 10;
-    if (first_line_empty && r < W) {
-      space[r][0].type = ALN;
-    }
-
-    check_joystick();
-
-    // alien fire
-    for (int i = 0; i < W; ++i) {
-      for (int j = 0; j < H / 2; ++j) {
-        if (space[i][j].type == ALN) {
-          r = random() % 10;
-          if (r == 0) {
-            space[i][j + 1].type = ALN_B;
-          }
-        }
-      }
-    }
-
-    check_joystick();
-
-    draw();
-  }
-
 }
